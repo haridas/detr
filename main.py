@@ -93,6 +93,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--test', action='store_true')
     parser.add_argument('--num_workers', default=2, type=int)
 
     # distributed training parameters
@@ -106,8 +107,8 @@ def main(args):
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
 
-    if args.frozen_weights is not None:
-        assert args.masks, "Frozen training is meant for segmentation only"
+    #if args.frozen_weights is not None:
+    #    assert args.masks, "Frozen training is meant for segmentation only"
     print(args)
 
     device = torch.device(args.device)
@@ -169,7 +170,10 @@ def main(args):
 
     if args.frozen_weights is not None:
         checkpoint = torch.load(args.frozen_weights, map_location='cpu')
-        model_without_ddp.detr.load_state_dict(checkpoint['model'])
+        if args.test:
+            model.load_state_dict(checkpoint['model'])
+        else:
+            model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
     if args.resume:
@@ -190,57 +194,65 @@ def main(args):
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
-
-    print("Start training")
-    start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            sampler_train.set_epoch(epoch)
-        train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm)
-        lr_scheduler.step()
+    elif args.test:
+        base_test_ds = get_coco_api_from_dataset(dataset_test)
+        test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
+                                              data_loader_test, base_test_ds,
+                                              device, args.output_dir)
         if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            # extra checkpoint before LR drop and every 100 epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 100 == 0:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
+            utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+        return
+    else:
+        print("Start training")
+        start_time = time.time()
+        for epoch in range(args.start_epoch, args.epochs):
+            if args.distributed:
+                sampler_train.set_epoch(epoch)
+            train_stats = train_one_epoch(
+                model, criterion, data_loader_train, optimizer, device, epoch,
+                args.clip_max_norm)
+            lr_scheduler.step()
+            if args.output_dir:
+                checkpoint_paths = [output_dir / 'checkpoint.pth']
+                # extra checkpoint before LR drop and every 100 epochs
+                if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 100 == 0:
+                    checkpoint_paths.append(output_dir / f"checkpoint{epoch:04}.pth")
+                for checkpoint_path in checkpoint_paths:
+                    utils.save_on_master({
+                        'model': model_without_ddp.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'lr_scheduler': lr_scheduler.state_dict(),
+                        'epoch': epoch,
+                        'args': args,
+                    }, checkpoint_path)
 
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
-        )
+            test_stats, coco_evaluator = evaluate(
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+            )
 
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
+            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                         **{f'test_{k}': v for k, v in test_stats.items()},
+                         'epoch': epoch,
+                         'n_parameters': n_parameters}
 
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
+            if args.output_dir and utils.is_main_process():
+                with (output_dir / "log.txt").open("a") as f:
+                    f.write(json.dumps(log_stats) + "\n")
 
-            # for evaluation logs
-            if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
-                if "bbox" in coco_evaluator.coco_eval:
-                    filenames = ['latest.pth']
-                    if epoch % 50 == 0:
-                        filenames.append(f'{epoch:03}.pth')
-                    for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
+                # for evaluation logs
+                if coco_evaluator is not None:
+                    (output_dir / 'eval').mkdir(exist_ok=True)
+                    if "bbox" in coco_evaluator.coco_eval:
+                        filenames = ['latest.pth']
+                        if epoch % 50 == 0:
+                            filenames.append(f'{epoch:03}.pth')
+                        for name in filenames:
+                            torch.save(coco_evaluator.coco_eval["bbox"].eval,
+                                       output_dir / "eval" / name)
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+        print('Training time {}'.format(total_time_str))
 
 
 if __name__ == '__main__':

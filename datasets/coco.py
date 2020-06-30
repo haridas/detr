@@ -165,7 +165,7 @@ def custom_coco_build(image_set, args):
     PATHS = {
         "train": (root / "train", root / 'train_coco.json'),
         "val": (root / "test", root / 'test_coco.json'),
-        "test": (root, root.parent / 'templates_test_data_coco.json'),
+        "test": (root / "templates_test_data_coco", root / 'templates_test_data_coco.json'),
     }
 
     img_folder, ann_file = PATHS[image_set]
